@@ -2951,6 +2951,16 @@ CompositeResultsPerDisplay SurfaceFlinger::composite(
 
         // Add outputs for virtual displays.
         if (display->isVirtual()) {
+            // Agent compose-bypass: if this is an agent-owned VD flagged for compose
+            // bypass, do NOT add it to the composition outputs. SF then performs zero
+            // composition work for it (no GPU, no output buffer), while its window /
+            // Activity / input are untouched (we never call into DisplayManager). This
+            // is the SF/video counterpart of the agent UI's GPU bypass.
+            if (isAgentComposeBypassed(display->getLayerStack())) {
+                ALOGV("AGENT_COMPOSE_BYPASS skipping VD layerStack=%u from composition",
+                      display->getLayerStack().id);
+                continue;
+            }
             const Fps refreshRate = display->getAdjustedRefreshRate();
 
             if (!refreshRate.isValid() ||
@@ -6753,8 +6763,10 @@ status_t SurfaceFlinger::CheckTransactCodeCredentials(uint32_t code) {
     }
     // Numbers from 1000 to 1047 are currently used for backdoors. The code
     // in onTransact verifies that the user is root, and has access to use SF.
-    if (code >= 1000 && code <= 1047) {
-        ALOGV("Accessing SurfaceFlinger through backdoor code: %u", code);
+    // 1050 is the agent compose-bypass backdoor (same root/SF-access guard in
+    // onTransact applies). Range extended to 1050 to cover it.
+    if (code >= 1000 && code <= 1050) {
+        ALOGE("AGENT_SF_BACKDOOR_RANGE code=%u allowed", code);
         return OK;
     }
     ALOGE("Permission Denial: SurfaceFlinger did not recognize request code: %u", code);
@@ -7308,6 +7320,20 @@ status_t SurfaceFlinger::onTransact(uint32_t code, const Parcel& data, Parcel* r
                                                      Duration::fromNs(minSfNs),
                                                      Duration::fromNs(maxSfNs),
                                                      Duration::fromNs(appDurationNs));
+                return NO_ERROR;
+            }
+            case 1050: {
+                // Agent compose-bypass toggle. data: int32 layerStack (== logical
+                // display id of the agent VD), int32 enable (1=skip compositing this
+                // VD, 0=resume). Skips ONLY SF compositing for the agent VD; never
+                // touches display power / window visibility / input, so the agent
+                // Activity stays RESUMED and DisplayList perception keeps working.
+                const int32_t layerStack = data.readInt32();
+                const int32_t enable = data.readInt32();
+                if (layerStack < 0) {
+                    return BAD_VALUE;
+                }
+                setAgentComposeBypass(static_cast<uint32_t>(layerStack), enable != 0);
                 return NO_ERROR;
             }
         }
@@ -8964,6 +8990,29 @@ void SurfaceFlinger::sfdo_scheduleCommit() {
 
 void SurfaceFlinger::sfdo_forceClientComposition(bool enabled) {
     mDebugDisableHWC = enabled;
+    scheduleRepaint();
+}
+
+bool SurfaceFlinger::isAgentComposeBypassed(ui::LayerStack layerStack) const {
+    std::lock_guard<std::mutex> lock(mAgentComposeBypassMutex);
+    return !mAgentComposeBypassLayerStacks.empty() &&
+            mAgentComposeBypassLayerStacks.count(layerStack.id) > 0;
+}
+
+void SurfaceFlinger::setAgentComposeBypass(uint32_t layerStack, bool enable) {
+    {
+        std::lock_guard<std::mutex> lock(mAgentComposeBypassMutex);
+        if (enable) {
+            mAgentComposeBypassLayerStacks.insert(layerStack);
+        } else {
+            mAgentComposeBypassLayerStacks.erase(layerStack);
+        }
+    }
+    ALOGI("AGENT_COMPOSE_BYPASS layerStack=%u enable=%d -> SF will %s compositing this VD",
+          layerStack, enable, enable ? "SKIP" : "RESUME");
+    // Force a repaint so the change (skip / resume compositing the VD) takes effect
+    // on the next composition pass. When re-enabling compositing (enable=false) this
+    // also makes SF repaint the VD so its ImageReader gets a fresh frame for fallback.
     scheduleRepaint();
 }
 

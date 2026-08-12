@@ -1442,6 +1442,28 @@ private:
     std::atomic<nsecs_t> mDebugInTransaction = 0;
     std::atomic_bool mForceFullDamage = false;
 
+    // Agent compose-bypass: layerStacks (== logical display ids) of agent-owned
+    // VirtualDisplays whose composition SurfaceFlinger should SKIP. When a VD's
+    // layerStack is in this set, it is NOT added to the composition outputs, so SF
+    // performs zero composition work for it (no GPU, no output buffer to its
+    // ImageReader) and any video/SurfaceView producers on it back-pressure. This is
+    // the SF/video counterpart of the agent UI's GPU bypass: it touches ONLY SF
+    // compositing for the agent VD and never the display power state / window
+    // visibility / input, so the agent Activity stays RESUMED, keeps receiving input,
+    // and DisplayList perception (which does not need the output surface) keeps
+    // working. Toggled via backdoor onTransact code 1050.
+    //
+    // Guarded by its OWN mutex (NOT mStateLock): the composite() loop reads it every
+    // frame and a binder thread writes it via the 1050 backdoor; a dedicated mutex
+    // makes this provably race-free without any assumption about whether composite()
+    // holds mStateLock (it uses FTL_FAKE_GUARD, which asserts but does not lock).
+    mutable std::mutex mAgentComposeBypassMutex;
+    std::unordered_set<uint32_t> mAgentComposeBypassLayerStacks;
+    // Returns true if this display is an agent VD currently flagged for compose
+    // bypass. Thread-safe (locks mAgentComposeBypassMutex).
+    bool isAgentComposeBypassed(ui::LayerStack) const;
+    void setAgentComposeBypass(uint32_t layerStack, bool enable);
+
     bool mLayerCachingEnabled = false;
     bool mBackpressureGpuComposition = false;
 
