@@ -8993,23 +8993,46 @@ void SurfaceFlinger::sfdo_forceClientComposition(bool enabled) {
     scheduleRepaint();
 }
 
-bool SurfaceFlinger::isAgentComposeBypassed(ui::LayerStack layerStack) const {
+bool SurfaceFlinger::isAgentComposeBypassed(ui::LayerStack layerStack) {
     std::lock_guard<std::mutex> lock(mAgentComposeBypassMutex);
-    return !mAgentComposeBypassLayerStacks.empty() &&
+    const bool bypassed = !mAgentComposeBypassLayerStacks.empty() &&
             mAgentComposeBypassLayerStacks.count(layerStack.id) > 0;
+    if (bypassed) {
+        mAgentComposeBypassSkipCounts[layerStack.id]++;
+    }
+    return bypassed;
 }
 
 void SurfaceFlinger::setAgentComposeBypass(uint32_t layerStack, bool enable) {
+    uint64_t skippedOutputs = 0;
+    nsecs_t enabledDurationNs = 0;
     {
         std::lock_guard<std::mutex> lock(mAgentComposeBypassMutex);
         if (enable) {
             mAgentComposeBypassLayerStacks.insert(layerStack);
+            mAgentComposeBypassSkipCounts[layerStack] = 0;
+            mAgentComposeBypassEnabledSince[layerStack] = systemTime(SYSTEM_TIME_MONOTONIC);
         } else {
+            const auto count = mAgentComposeBypassSkipCounts.find(layerStack);
+            if (count != mAgentComposeBypassSkipCounts.end()) {
+                skippedOutputs = count->second;
+            }
+            const auto since = mAgentComposeBypassEnabledSince.find(layerStack);
+            if (since != mAgentComposeBypassEnabledSince.end()) {
+                enabledDurationNs = systemTime(SYSTEM_TIME_MONOTONIC) - since->second;
+            }
             mAgentComposeBypassLayerStacks.erase(layerStack);
+            mAgentComposeBypassSkipCounts.erase(layerStack);
+            mAgentComposeBypassEnabledSince.erase(layerStack);
         }
     }
     ALOGI("AGENT_COMPOSE_BYPASS layerStack=%u enable=%d -> SF will %s compositing this VD",
           layerStack, enable, enable ? "SKIP" : "RESUME");
+    if (!enable) {
+        ALOGI("AGENT_COMPOSE_BYPASS_SUMMARY layerStack=%u skipped_outputs=%" PRIu64
+              " enabled_ms=%.3f", layerStack, skippedOutputs,
+              enabledDurationNs / 1000000.0);
+    }
     // Force a repaint so the change (skip / resume compositing the VD) takes effect
     // on the next composition pass. When re-enabling compositing (enable=false) this
     // also makes SF repaint the VD so its ImageReader gets a fresh frame for fallback.

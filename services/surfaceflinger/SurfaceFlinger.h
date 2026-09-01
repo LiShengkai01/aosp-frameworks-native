@@ -1459,9 +1459,12 @@ private:
     // holds mStateLock (it uses FTL_FAKE_GUARD, which asserts but does not lock).
     mutable std::mutex mAgentComposeBypassMutex;
     std::unordered_set<uint32_t> mAgentComposeBypassLayerStacks;
+    std::unordered_map<uint32_t, uint64_t> mAgentComposeBypassSkipCounts;
+    std::unordered_map<uint32_t, nsecs_t> mAgentComposeBypassEnabledSince;
     // Returns true if this display is an agent VD currently flagged for compose
-    // bypass. Thread-safe (locks mAgentComposeBypassMutex).
-    bool isAgentComposeBypassed(ui::LayerStack) const;
+    // bypass. A true result also records one skipped composition output.
+    // Thread-safe (locks mAgentComposeBypassMutex).
+    bool isAgentComposeBypassed(ui::LayerStack);
     void setAgentComposeBypass(uint32_t layerStack, bool enable);
 
     bool mLayerCachingEnabled = false;
